@@ -1,0 +1,134 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print list of rules for a program or stream
+
+import sys
+import psycopg2
+import re
+from helpers import getProgram, getStream, sortSubjectRule, sortStreamRule
+
+# define any local helper functions here
+# ...
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} (ProgramCode|StreamCode)"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+code = sys.argv[1]
+if len(code) == 4:
+  codeOf = "program"
+elif len(code) == 6:
+  codeOf = "stream"
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  if codeOf == "program":
+    progInfo = getProgram(db,code)
+    if not progInfo:
+      print(f"Invalid program code {code}")
+      exit()
+
+    code = progInfo[0]
+    name = progInfo[2]
+    print(f'{code} {name}, {progInfo[3]} UOC, {progInfo[6]/12:.1f} years')
+
+    cur = db.cursor()
+    query = """
+    select * from q2Programs 
+    where code = %s
+    """
+    cur.execute(query, [code])
+    res = cur.fetchone()
+    print(f'- offered by {res[3]}')
+    print('Academic Requirements:')
+    query = """
+    select rule from program_rules 
+    where program = %s
+    """
+    cur.execute(query, [code])
+    res = cur.fetchall()
+    #Loop through all rules
+    for rule in res:
+      ruleId = rule[0]
+      query = """
+      select r.min_req, r.max_req, r.type, a.name, a.type, a.defby, a.definition
+      from rules r
+        join academic_object_groups a on (r.ao_group = a.id)
+      where r.id = %s
+      order by r.id
+      """
+      cur.execute(query, [ruleId])
+      academic_object = cur.fetchone()
+      '''
+      typeCode = cc, fe etc... 
+      types = subject/stream
+      defby = enumerated/pattern
+      '''
+      minUoc, maxUoc, typeCode, name, types, defby, definition = academic_object
+      definition = list(definition.split(','))
+      if (types == 'stream'):
+        sortStreamRule(minUoc, maxUoc, typeCode, name, types, defby, definition, cur)
+
+      elif (types == 'subject'):
+        sortSubjectRule(minUoc, maxUoc, typeCode, name, types, defby, definition, cur)
+
+##############################################
+
+  elif codeOf == "stream":
+    strmInfo = getStream(db,code)
+    if not strmInfo:
+      print(f"Invalid stream code {code}")
+      exit()
+
+    print(f'{strmInfo[1]} {strmInfo[2]}')  #debug
+    cur = db.cursor()
+    query = """
+    select * from q2Streams 
+    where code = %s
+    """
+    cur.execute(query, [code])
+    res = cur.fetchone()
+    streamId = res[0]
+    print(f'- offered by {res[3]}')
+    print('Academic Requirements:')
+    query = """
+    select rule from stream_rules 
+    where stream = %s
+    """
+    cur.execute(query, [streamId])
+    res = cur.fetchall()
+    # GO through all rules
+    for rule in res:
+      ruleId = rule[0]
+      query = """
+      select r.min_req, r.max_req, r.type, a.name, a.type, a.defby, a.definition
+      from rules r
+        join academic_object_groups a on (r.ao_group = a.id)
+      where r.id = %s
+      order by r.id
+      """
+      cur.execute(query, [ruleId])
+      academic_object = cur.fetchone()
+
+      '''
+      typeCode = cc, fe etc... 
+      types = subject/stream
+      defby = enumerated/pattern
+      '''
+      
+      minUoc, maxUoc, typeCode, name, types, defby, definition = academic_object
+      definition = list(definition.split(','))
+      # Go through UOC requirements
+      sortSubjectRule(minUoc, maxUoc, typeCode, name, types, defby, definition, cur)
+
+except Exception as err:
+  print(err)
+finally:
+  if db:
+    db.close()

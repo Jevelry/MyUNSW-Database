@@ -1,0 +1,289 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... progression check for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent, getProgram, getStream, getCourse,getRule, notCompleted,printCC,printPE,canGraduate
+
+# define any local helper functions here
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID [Program Stream]"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+  zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+  print("Invalid student ID")
+  exit(1)
+
+progCode = None
+strmCode = None
+
+if argc == 4:
+  progCode = sys.argv[2]
+  strmCode = sys.argv[3]
+
+
+
+# manipulate database
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  cur = db.cursor()
+  stuInfo = getStudent(db,zid)
+  if not stuInfo:
+    print(f"Invalid student id {zid}")
+    exit()
+
+  if progCode:
+    progInfo = getProgram(db,progCode)
+    if not progInfo:
+      print(f"Invalid program code {progCode}")
+      exit()
+
+  if strmCode:
+    strmInfo = getStream(db,strmCode)
+    if not strmInfo:
+      print(f"Invalid program code {strmCode}")
+      exit()
+  
+  query = '''
+  select p.program, s.code 
+  from program_enrolments p
+  join stream_enrolments se on (p.id = se.partof)
+  join streams s on (se.stream = s.id)
+  where p.student = %s and term = (select max(term) 
+  from program_enrolments p
+  where p.student = %s)
+  ;
+  '''
+  if progCode is None:
+    cur.execute(query, [zid, zid])
+    progCode = cur.fetchone()
+    progCode = str(progCode[0])
+    progInfo = getProgram(db,progCode)
+    
+  if strmCode is None:
+    cur.execute(query, [zid, zid])
+    strmCode = cur.fetchone()
+    strmCode = str(strmCode[1])
+    strmInfo = getStream(db,strmCode)
+  
+  print(f'{stuInfo[0]} {stuInfo[1]}, {stuInfo[2]}')
+  print(f'  {progInfo[0]} {progInfo[2]}')
+  print(f'  {strmInfo[1]} {strmInfo[2]}')
+
+  print('\nCompleted:')
+
+
+  
+  # Declare dictionary to store rules
+  rules = {}
+
+  # Get all requirements into a dictionary
+
+  # Get program rules
+  query = """
+  select rule from program_rules 
+  where program = %s
+  """
+  cur.execute(query, [progCode])
+  res = cur.fetchall()
+  for rule in res:
+    ruleId = rule[0]
+    academic_object = getRule(db, ruleId)
+    minUoc, maxUoc, typeCode, name, types, defby, definition = academic_object
+    definition = list(definition.split(','))
+    # Ignore if its a stream
+    if typeCode == 'DS':
+      continue
+    else:
+      ruleInfo = {}
+      ruleInfo['type'] = typeCode
+      ruleInfo['minUoc'] = minUoc
+      ruleInfo['maxUoc'] = maxUoc
+      ruleInfo['courses'] = definition
+      ruleInfo['completedUoc'] = 0
+      ruleInfo['defby'] = defby
+      ruleInfo['strmsub'] = 'program'
+      rules[name] = ruleInfo
+
+  # Get Stream Rules
+  query = """
+  select rule from stream_rules 
+  where stream = %s
+  """
+  cur.execute(query, [strmInfo[0]])
+  res = cur.fetchall()
+  # Go through all rules
+  for rule in res:
+    ruleId = rule[0]
+    academic_object = getRule(db, ruleId)
+    minUoc, maxUoc, typeCode, name, types, defby, definition = academic_object
+    definition = list(definition.split(','))
+    ruleInfo = {}
+    ruleInfo['type'] = typeCode
+    ruleInfo['minUoc'] = minUoc
+    ruleInfo['maxUoc'] = maxUoc
+    ruleInfo['courses'] = definition
+    ruleInfo['completedUoc'] = 0
+    ruleInfo['defby'] = defby
+    ruleInfo['strmsub'] = 'stream'
+    rules[name] = ruleInfo
+
+
+  query = """
+  select * from getTranscript(%s)
+  """
+  cur.execute(query, [zid])
+  transcript = cur.fetchall()
+  
+  for course in transcript:
+    done = False
+    if (course[3]) is None:
+      course = list(course)
+      course[3] = '-'
+      course = tuple(course)
+    if (course[4]) is None:
+      course = list(course)
+      course[4] = ' -'
+      course = tuple(course)
+    #print(course)
+    # If failed or unresolved
+    if (course[4] in ['AF', 'FL', 'UF', 'E', 'F']):
+      print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   fail does not count')
+      continue
+    if (course[4] in ['AS','AW','PW','NA','RD','NF','LE','PE','WD','WJ']):
+      print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   unrs does not count')
+      continue
+    if ('GEN' in course[0]):
+      if notCompleted(rules['General Education']):
+        rules['General Education']['completedUoc'] += course[5]
+        print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards General Education')
+        continue
+      else:
+        print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}  0uoc does not satisfy any rule')
+        continue
+    for rule in rules:
+      if rule != 'ADK Courses':
+        if any(course[0] in string for string in rules[rule]['courses']):
+        # if course[0] in rules[rule]['courses']:
+            
+          if notCompleted(rules[rule]):
+            rules[rule]['completedUoc'] += course[5]
+            rules[rule]['courses'] = [x for x in rules[rule]['courses'] if course[0] not in x]
+          if 'ADK Courses' in rules:
+            if course[0] in rules['ADK Courses']['courses']:
+              if notCompleted(rules['ADK Courses']):
+                rules['ADK Courses']['completedUoc'] += course[5]
+                rules['ADK Courses']['courses'].remove(course[0])
+                print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards {rule} + ADK Courses')
+                done = True
+                break
+          print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards {rule}')
+          done = True
+          break
+    if done:
+      continue
+    # Must be ADK exclusive
+    if 'ADK Courses' in rules:
+      if course[0] in rules['ADK Courses']['courses']:
+        if notCompleted(rules['ADK Courses']):
+          rules['ADK Courses']['completedUoc'] += course[5]
+          rules['ADK Courses']['courses'].remove(course[0])
+          print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards ADK Courses')
+          done = True
+          continue
+      
+    for rule in rules:
+      if rules[rule]['defby'] == 'pattern':
+        for elective in rules[rule]['courses']:
+          if elective.rstrip('#') in course[0]:
+            if notCompleted(rules[rule]):   
+              rules[rule]['completedUoc'] += course[5]
+              print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards {rule}')
+              done = True
+              break
+    if done:
+      continue
+    # Can't find it in anything
+    # Check free electives
+    for rule in rules:
+      if rules[rule]['type'] == 'FE':
+        if notCompleted(rules[rule]):
+          rules[rule]['completedUoc'] += course[5]
+          print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   {course[5]}uoc towards Free Electives')   
+          done = True
+          break
+    if done:
+      continue
+
+    print(f'{course[0]} {course[1]} {course[2]:<31s} {course[3]:>3} {course[4]:2s}   0uoc does not satisfy any rule')
+
+  # Get completed Uoc
+  totalUoc = 0
+  for rule in rules:
+    if rule != 'ADK Courses':
+      totalUoc += rules[rule]['completedUoc']
+  print(f'UOC = {totalUoc} so far')
+
+  if canGraduate(rules):
+    print('\nElligible to graduate')
+    
+  else:
+    print('\nRemaining to complete degree:')
+
+    # Get remaining stuff
+    for rule in rules:
+      if rules[rule]['strmsub'] == 'stream' and rules[rule]['type'] == 'CC':  
+        if notCompleted(rules[rule]):
+          printCC(rules[rule]['courses'], cur)
+        
+    for rule in rules:
+      if rules[rule]['strmsub'] == 'program' and rules[rule]['type'] == 'CC':  
+        if notCompleted(rules[rule]):
+          printCC(rules[rule]['courses'], cur)
+        
+    for rule in rules:
+      if rules[rule]['strmsub'] == 'stream' and rules[rule]['type'] == 'PE':  
+        if notCompleted(rules[rule]):
+          printPE(rules[rule]['minUoc'], rules[rule]['maxUoc'], rules[rule]['completedUoc'], rule) 
+    for rule in rules:
+      if rules[rule]['strmsub'] == 'program' and rules[rule]['type'] == 'PE':  
+        if notCompleted(rules[rule]):
+          printPE(rules[rule]['minUoc'], rules[rule]['maxUoc'], rules[rule]['completedUoc'], rule) 
+
+    for rule in rules:
+      if rules[rule]['type'] == 'GE':  
+        if notCompleted(rules[rule]):
+          minUoc = rules[rule]['minUoc']
+          completedUoc = rules[rule]['completedUoc']
+          print(f'{minUoc - completedUoc} UOC of General Education') 
+
+    for rule in rules:
+      if rules[rule]['type'] == 'FE':  
+        if notCompleted(rules[rule]):
+          minUoc = rules[rule]['minUoc']
+          completedUoc = rules[rule]['completedUoc']
+          if rules[rule]['maxUoc'] is None:
+            print(f'at least {minUoc - completedUoc} UOC of Free Electives')  
+          else:
+            print(f'{minUoc - completedUoc} UOC of Free Electives')  
+
+except Exception as err:
+  print("DB error: ", err)
+finally:
+  if db:
+    db.close()
+
